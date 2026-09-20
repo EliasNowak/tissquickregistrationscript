@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name       TISS Quick Registration Script
 // @namespace  http://www.manuelgeier.com/
-// @version    2.0.0
+// @version    2.0.1
 // @description  Registers you for a TISS group/LVA/exam as fast as technically possible. Syncs to the TISS server clock, fires at the exact millisecond the registration opens and drives the whole register -> study code -> confirm -> ok chain with background requests instead of full page loads.
 // @match      https://tiss.tuwien.ac.at/*
 // @run-at     document-start
@@ -36,6 +36,15 @@ SOFTWARE.
 
 /*
  Changelog:
+
+ v2.0.1 [20.09.2026]
+ + Added: dryRun option. Runs the complete chain except the registration itself, so you can
+   verify your setup days in advance instead of at 20:00:00.
+ + Added: detection for a userscript manager that runs the script in a sandbox, where the
+   background requests would go out without your TISS session cookie.
+ + Added: the script checks itself that it runs in the top window, because Greasemonkey
+   does not honour @noframes.
+ + Added: a log note when the browser blocks the precise worker timer.
 
  v2.0.0 [17.09.2026]
  + Added: turbo mode. The whole registration chain (register -> study code -> confirm -> ok)
@@ -113,6 +122,12 @@ SOFTWARE.
 
 (function () {
     'use strict';
+
+    // Only run in the top window. @noframes is not honoured by every userscript manager,
+    // and a second instance inside an iframe would start its own registration.
+    if (window.top !== window.self) {
+        return;
+    }
 
     ///////////////////////////////////////////////////////////////////////
     // Configurate the script here
@@ -250,6 +265,12 @@ SOFTWARE.
 
         // Reload the page after a successful registration so you see the real TISS state. [true,false]
         reloadAfterSuccess: true,
+
+        // Dry run: do everything (clock sync, fetch the page, run the checks, find the
+        // register button) but stop right before actually registering. Use this a few days
+        // before the real registration to verify that your browser and userscript manager
+        // work, instead of finding out at 20:00:00. [true,false]
+        dryRun: false,
 
         // verbose console output [true,false]
         debug: false
@@ -402,7 +423,13 @@ SOFTWARE.
             }
         }
 
-        return { sleep: sleep, waitUntil: waitUntil };
+        return {
+            sleep: sleep,
+            waitUntil: waitUntil,
+            // false means we fell back to window timers, which browsers throttle in
+            // background tabs (a strict Content-Security-Policy can cause this)
+            usesWorker: function () { return !!getWorker(); }
+        };
     })();
 
 
@@ -792,10 +819,21 @@ SOFTWARE.
     }
 
     function isLoginPage(doc, url) {
-        if (/login\.xhtml|\/logout/i.test(url || '')) {
+        if (/login\.xhtml/i.test(url || '')) {
             return true;
         }
         return !!qs('input[type="password"]', doc);
+    }
+
+    // If the page you are looking at is logged in but the page we fetched in the background
+    // is not, then the request went out without your session cookie. That is what a
+    // userscript manager running the script in a sandbox instead of in the page looks like.
+    function sessionWasCarriedOver(fetched) {
+        var liveLogout = qs('a[href*="logout"]', document);
+        if (!liveLogout) {
+            return true; // cannot tell, do not cry wolf
+        }
+        return !!qs('a[href*="logout"]', fetched);
     }
 
     function highlight(element) {
@@ -1018,6 +1056,13 @@ SOFTWARE.
                     return;
                 }
 
+                if (!sessionWasCarriedOver(page.doc)) {
+                    state.finished = true;
+                    state.result = { ok: false, reason: 'background requests are going out without your TISS ' +
+                        'session. Make sure "@grant none" is still in the script header, or set turboMode: false.' };
+                    return;
+                }
+
                 if (!checksDone) {
                     var problem = checkPage(page.doc);
                     if (problem) {
@@ -1068,6 +1113,58 @@ SOFTWARE.
                 ? options.pollIntervalMs
                 : options.slowPollIntervalMs;
             await Timer.sleep(interval - (Clock.now() - startedAt));
+        }
+    }
+
+    // Everything the real run does, except the part that actually registers you.
+    async function runDryRun() {
+        UI.log('--- DRY RUN, nothing will be registered ---');
+        var startedAt = Date.now();
+        var page;
+        try {
+            page = await httpGet(registrationPageUrl());
+        } catch (error) {
+            UI.out('DRY RUN FAILED: the background request did not go through (' + error.message + ')');
+            return;
+        }
+        UI.log('background request ok, ' + (Date.now() - startedAt) + 'ms, status ' + page.status);
+
+        if (isLoginPage(page.doc, page.url)) {
+            UI.out('DRY RUN FAILED: TISS answered with the login page. Log in to TISS first.');
+            return;
+        }
+        if (!sessionWasCarriedOver(page.doc)) {
+            UI.out('DRY RUN FAILED: the request went out without your TISS session. Check that ' +
+                '"@grant none" is in the script header, or set turboMode: false.');
+            return;
+        }
+        UI.log('your TISS session is used by the background requests: ok');
+
+        var problem = checkPage(page.doc);
+        if (problem) {
+            UI.out('DRY RUN FAILED: ' + problem);
+            return;
+        }
+        UI.log('lva number and semester: ok');
+
+        var target = findTarget(page.doc);
+        if (!target) {
+            UI.out('DRY RUN FAILED: "' + targetName() + '" was not found on this page. Check the name.');
+            return;
+        }
+        UI.log('found "' + targetName() + '" on the page: ok');
+
+        if (getCancelButton(target.wrapper)) {
+            UI.success('DRY RUN: you are already registered here. Everything works.');
+            return;
+        }
+        var registerButton = getRegistrationButton(target.wrapper);
+        if (registerButton) {
+            UI.success('DRY RUN: registration is open right now. The real run would press "' +
+                registerButton.value.trim() + '" immediately. Everything works.');
+        } else {
+            UI.success('DRY RUN: everything works. Registration is not open yet, so there is no ' +
+                'button to press - that is expected.');
         }
     }
 
@@ -1261,12 +1358,17 @@ SOFTWARE.
             return;
         }
 
-        UI.log('TISS Quick Registration Script v2.0.0 enabled');
+        UI.log('TISS Quick Registration Script v2.0.1 enabled');
         UI.log('LVA: ' + getLVANumber(document) + ' ' + getLVAName(document));
         UI.log('Target: ' + targetName());
         UI.log('Tab: ' + getSelectedTab(document));
 
         keepAwake();
+
+        if (!Timer.usesWorker()) {
+            UI.log('Note: precise worker timers are not available here, keep this tab in the ' +
+                'foreground so the browser does not throttle the countdown.');
+        }
 
         // highlight what we are going to register for, so you can see it is the right one
         var target = findTarget(document);
@@ -1298,6 +1400,11 @@ SOFTWARE.
             } else {
                 UI.log('Server clock sync not available, using the local clock');
             }
+        }
+
+        if (options.dryRun) {
+            await runDryRun();
+            return;
         }
 
         if (options.startAtSpecificTime) {

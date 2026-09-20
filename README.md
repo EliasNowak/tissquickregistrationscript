@@ -45,9 +45,23 @@ there is no point in hammering the university's server.
 ## Requirements
 
 * Google Chrome with [Tampermonkey](https://chrome.google.com/webstore/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo "Tampermonkey"), or
-* Firefox with [Greasemonkey](https://addons.mozilla.org/de/firefox/addon/greasemonkey "Greasemonkey")
+* Firefox with [Greasemonkey](https://addons.mozilla.org/de/firefox/addon/greasemonkey "Greasemonkey"),
+  [Violentmonkey](https://addons.mozilla.org/firefox/addon/violentmonkey/) or Tampermonkey
 
 No other dependencies. Version 2 no longer loads jQuery.
+
+**Do not remove `@grant none` from the script header.** It is what makes the userscript run
+inside the page instead of in the manager's sandbox, and only then do the background requests
+carry your TISS session cookie. The script detects it if that ever breaks and tells you, instead
+of quietly failing at the worst possible moment. If you do end up in a sandbox you cannot get out
+of, set `turboMode: false` and you are back to the classic (slower) behaviour.
+
+Greasemonkey does not honour `@noframes`, so the script checks by itself that it is running in the
+top window; it will not start a second registration from inside an iframe.
+
+If the browser refuses to create the Web Worker used for the precise timer (a strict
+Content-Security-Policy can do that), the script says so in its log and falls back to normal
+timers. Keep the tab in the foreground in that case, because background tabs get throttled.
 
 
 ## Usage
@@ -60,6 +74,18 @@ No other dependencies. Version 2 no longer loads jQuery.
    you switch to another tab. (Staying on the tab works too.)
 1. Lean back and let the script do its job.
 1. Don’t forget to disable the UserScript if the registration is done.
+
+### Test it before the day that counts
+
+Set `dryRun: true` and open any course page you are allowed to see. The script then does
+everything the real run does - synchronise the clock, fetch the page in the background, verify
+your session, check the LVA number and semester, find your group - and stops right before it would
+register you. It tells you in plain words whether your setup works and what is wrong if it does
+not (wrong group name, wrong semester, expired session, ...).
+
+Do this a few days ahead. Finding out at 20:00:00 that the group name has a typo is the one
+failure mode this script cannot compensate for. Set `dryRun` back to `false` for the real run.
+
 
 ### Getting the most out of it
 
@@ -85,6 +111,7 @@ All options are documented in the script itself, at the top. The ones you always
 | `lvaNumber`, `lvaSemester` | safety checks so you cannot register for the wrong course |
 | `studyCode` | only needed if you have more than one study code |
 | `startAtSpecificTime`, `specificStartTime` | when the registration opens |
+| `dryRun` | test your setup without registering (see above) |
 
 The speed related options below them (`turboMode`, `syncServerClock`, `leadTimeMs`,
 `pollIntervalMs`, `parallelLanes`, `useWorkerTimer`, `keepAwake`, ...) already default to the fast
